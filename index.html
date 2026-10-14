@@ -125,7 +125,7 @@ textarea.input{min-height:150px;resize:vertical;line-height:1.5}
   </div>
   <button class="iconbtn" id="menuBtn" aria-label="Exportar e importar">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg>
-    <span>Exportar</span>
+    <span>Respaldo</span>
   </button>
 </header>
 
@@ -251,7 +251,7 @@ function renderList(){
   const rows=items.filter(i=>(filter==="todos"||i.estado===filter)&&(!q||[i.titulo,i.tag,i.area,i.notas].join(" ").toLowerCase().includes(q)))
     .sort((a,b)=>b.actualizado-a.actualizado);
   const L=$("list");
-  if(!items.length){L.innerHTML=`<div class="empty"><strong>Aún no hay trabajos</strong>Crea uno con <b>Nuevo trabajo</b>. Cada trabajo guarda sus notas y todas sus fotos juntas.</div>`;return;}
+  if(!items.length){L.innerHTML=`<div class="empty"><strong>Aún no hay trabajos</strong>Crea uno con <b>Nuevo trabajo</b>. Cada trabajo guarda sus notas y todas sus fotos juntas.<br><br>¿Ya los tienes en el celular? Exporta el ZIP allá y <button class="btn" id="emptyImp" style="display:inline-flex">impórtalo aquí</button>, o arrástralo a esta ventana.</div>`;$("emptyImp").onclick=()=>$("impInput").click();return;}
   if(!rows.length){L.innerHTML=`<div class="empty"><strong>Nada coincide</strong>Prueba otra búsqueda o filtro.</div>`;return;}
   L.innerHTML=rows.map(i=>{const f=i.fotos[0];
     return `<button class="card" data-id="${i.id}">
@@ -360,13 +360,13 @@ async function buildZip(list){
   list.forEach((it,n)=>{
     const folder=`${String(n+1).padStart(2,"0")}_${safe(it.titulo)}`, F=R.folder(folder);
     const fotos=it.fotos.map((p,i)=>{const name=`foto_${String(i+1).padStart(2,"0")}${p.nota?"_"+safe(p.nota):""}.jpg`;F.file(name,p.blob);
-      return {nombre:name,nota:p.nota,fecha:p.fecha};});
+      return {id:p.id,nombre:name,nota:p.nota,fecha:p.fecha};});
     const txt=[`TRABAJO: ${it.titulo||"Sin título"}`,`TAG:     ${it.tag||"-"}`,`ÁREA:    ${it.area||"-"}`,`ESTADO:  ${ESTADOS[it.estado]}`,
       `CREADO:  ${fmt(it.creado)}`,`ACTUAL.: ${fmt(it.actualizado)}`,"","NOTAS","-----",it.notas||"(sin notas)","",
       `FOTOS (${fotos.length})`,"---------",...fotos.map(f=>`${f.nombre}${f.nota?"  —  "+f.nota:""}`)].join("\r\n");
     F.file("notas.txt","﻿"+txt);
     csv.push([n+1,it.titulo,it.tag,it.area,ESTADOS[it.estado],fotos.length,fmt(it.creado),fmt(it.actualizado),folder,it.notas].map(csvCell).join(";"));
-    meta.items.push({carpeta:folder,titulo:it.titulo,tag:it.tag,area:it.area,estado:it.estado,notas:it.notas,creado:it.creado,actualizado:it.actualizado,fotos});
+    meta.items.push({id:it.id,carpeta:folder,titulo:it.titulo,tag:it.tag,area:it.area,estado:it.estado,notas:it.notas,creado:it.creado,actualizado:it.actualizado,fotos});
     rep+=`<section><h2>${n+1}. ${esc(it.titulo||"Sin título")}</h2>
       <div class="m">${[it.tag&&"TAG: "+esc(it.tag),it.area&&"Área: "+esc(it.area),"Estado: "+ESTADOS[it.estado],"Actualizado: "+fmt(it.actualizado)].filter(Boolean).join(" · ")}</div>
       <pre>${esc(it.notas||"(sin notas)")}</pre>
@@ -406,28 +406,44 @@ $("exportOneBtn").addEventListener("click",()=>exportSheet([current],"este traba
 $("menuBtn").addEventListener("click",()=>{
   if(current){exportSheet([current],"este trabajo");return;}
   const pend=items.filter(i=>i.estado!=="hecho");
-  sheet(`<h2>Exportar o importar</h2><p>El ZIP también sirve de respaldo: lo puedes volver a importar en otro teléfono.</p>
+  sheet(`<h2>Exportar o importar</h2><p>El ZIP también sirve de respaldo: impórtalo en el PC o en otro teléfono para ver lo mismo. Si un trabajo ya existe, se actualiza con la versión más reciente en vez de duplicarse.</p>
     <div class="btns"><button class="btn primary" data-a="all">Exportar todos (${items.length})</button>
     <button class="btn" data-a="pend">Exportar solo no terminados (${pend.length})</button>
-    <button class="btn" data-a="imp">Importar respaldo ZIP</button><button class="btn" data-a="close">Cancelar</button></div>`,
+    <button class="btn" data-a="imp">Importar ZIP (del celular o del PC)</button><button class="btn" data-a="close">Cancelar</button></div>`,
     a=>{if(a==="all")exportSheet(items.slice().sort((x,y)=>x.creado-y.creado),"todos los trabajos");
       if(a==="pend")exportSheet(pend.sort((x,y)=>x.creado-y.creado),"trabajos no terminados");
       if(a==="imp")$("impInput").click();});});
 
-/* ---------- Importar ---------- */
-$("impInput").addEventListener("change",async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;
+/* ---------- Importar (fusiona por id, sin duplicar) ---------- */
+async function importZip(f){
   busy("Importando…");
   try{const zip=await JSZip.loadAsync(f);const mf=Object.keys(zip.files).find(n=>n.endsWith("respaldo.json"));
-    if(!mf)throw new Error("el ZIP no tiene respaldo.json (debe ser un ZIP exportado desde esta app)");
-    const base=mf.slice(0,mf.length-"respaldo.json".length);const meta=JSON.parse(await zip.file(mf).async("string"));let n=0;
-    for(const m of meta.items){const fotos=[];
-      for(const p of m.fotos){const zf=zip.file(base+m.carpeta+"/"+p.nombre);if(!zf)continue;
-        const b=await zf.async("blob");fotos.push({id:uid(),blob:new Blob([b],{type:"image/jpeg"}),nota:p.nota||"",fecha:p.fecha||Date.now()});}
-      const it={id:uid(),titulo:m.titulo||"",tag:m.tag||"",area:m.area||"",estado:ESTADOS[m.estado]?m.estado:"pendiente",notas:m.notas||"",
+    if(!mf)throw new Error("el ZIP no tiene respaldo.json. Usa un ZIP exportado desde esta app.");
+    const base=mf.slice(0,mf.length-"respaldo.json".length);const meta=JSON.parse(await zip.file(mf).async("string"));
+    let nuevos=0,actual=0,igual=0;
+    for(const m of meta.items){
+      const prev=m.id?items.find(i=>i.id===m.id):null;
+      if(prev&&(prev.actualizado||0)>=(m.actualizado||0)){igual++;continue;}
+      const fotos=[];
+      for(const p of m.fotos){
+        const old=prev&&p.id?prev.fotos.find(x=>x.id===p.id):null;
+        if(old){old.nota=p.nota||"";fotos.push(old);continue;}
+        const zf=zip.file(base+m.carpeta+"/"+p.nombre);if(!zf)continue;
+        const b=await zf.async("blob");fotos.push({id:p.id||uid(),blob:new Blob([b],{type:"image/jpeg"}),nota:p.nota||"",fecha:p.fecha||Date.now()});}
+      const it={id:m.id||uid(),titulo:m.titulo||"",tag:m.tag||"",area:m.area||"",estado:ESTADOS[m.estado]?m.estado:"pendiente",notas:m.notas||"",
         fotos,creado:m.creado||Date.now(),actualizado:m.actualizado||Date.now()};
-      items.push(it);await putItem(it);n++;}
-    renderList();toast(`Importados ${n} trabajo${n===1?"":"s"}`);}
-  catch(err){toast("No se pudo importar: "+err.message);}finally{busy();}});
+      if(prev){items[items.indexOf(prev)]=it;actual++;}else{items.push(it);nuevos++;}
+      await putItem(it);}
+    renderList();
+    toast([nuevos&&`${nuevos} nuevo${nuevos>1?"s":""}`,actual&&`${actual} actualizado${actual>1?"s":""}`,igual&&`${igual} sin cambios`].filter(Boolean).join(" · ")||"El ZIP no traía trabajos");}
+  catch(err){toast("No se pudo importar: "+err.message);}finally{busy();}}
+$("impInput").addEventListener("change",e=>{const f=e.target.files[0];e.target.value="";if(f)importZip(f);});
+/* Arrastrar y soltar el ZIP en la ventana (PC) */
+window.addEventListener("dragover",e=>{if([...e.dataTransfer.types].includes("Files")){e.preventDefault();busy("Suelta el ZIP para importarlo");}});
+window.addEventListener("dragleave",e=>{if(e.clientX<=0||e.clientY<=0||e.clientX>=innerWidth||e.clientY>=innerHeight)busy();});
+window.addEventListener("drop",e=>{e.preventDefault();busy();const f=[...e.dataTransfer.files].find(x=>/\.zip$/i.test(x.name));
+  if(!f){toast("Arrastra un archivo .zip exportado desde la app");return;}
+  if(current&&history.state&&history.state.d)history.back();importZip(f);});
 
 /* ---------- Arranque ---------- */
 (async()=>{
